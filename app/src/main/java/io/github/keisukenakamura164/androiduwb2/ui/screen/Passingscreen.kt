@@ -70,6 +70,11 @@ fun PassingScreen(viewModel: AutoRoleViewModel = viewModel()) {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Text(
+                text = "現在の役割: ${uiState.role}", // ViewModelが持つ役割(role)を表示
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.padding(bottom = 32.dp)
+            )
             if (!isGranted.value) {
                 Text(
                     text = "権限を許可してください",
@@ -77,14 +82,14 @@ fun PassingScreen(viewModel: AutoRoleViewModel = viewModel()) {
                 )
             } else if (distance == null) {
                 Text(
-                    text = "接続中...",
+                    text = "相手を探しています...", // メッセージをより具体的に変更
                     style = MaterialTheme.typography.bodyLarge
                 )
             } else {
                 val distanceText = "距離: %.2f m".format(distance)
                 Text(
                     text = distanceText,
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MaterialTheme.typography.displayMedium // 数字を大きく表示
                 )
 
                 if (distance <= 10) {

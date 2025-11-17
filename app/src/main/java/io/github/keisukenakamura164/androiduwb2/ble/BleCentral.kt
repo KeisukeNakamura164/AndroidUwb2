@@ -14,122 +14,265 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import kotlin.coroutines.resumeWithException
 
-/** BLE セントラル側のコード */
+@SuppressLint("MissingPermission")
 class BleCentral(private val context: Context) {
 
-    /** [readCharacteristic]等で使いたいので */
-    private val _bluetoothGatt = MutableStateFlow<BluetoothGatt?>(null)
+    private val bluetoothManager =
+        context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val bluetoothAdapter = bluetoothManager.adapter
+    private var bluetoothGatt: BluetoothGatt? = null
 
-    /** コールバックの返り値をコルーチン側から受け取りたいので */
-    private val _characteristicReadChannel = Channel<ByteArray>()
+    private var connectContinuation: Continuation<BluetoothGatt>? = null
+    private var readContinuation: Continuation<ByteArray>? = null
+    private var writeContinuation: Continuation<Unit>? = null
 
-    /** BLE 通信をし、GATT サーバーへ接続しサービスを探す */
-    @SuppressLint("MissingPermission")
-    suspend fun connectGattServer() {
-        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    // 統一されたGATTコールバック
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            android.util.Log.d("BleCentral", "Connection state: $newState, status: $status")
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                android.util.Log.d("BleCentral", "Connected, discovering services...")
+                gatt.discoverServices()
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                connectContinuation?.resumeWithException(RuntimeException("Disconnected"))
+                connectContinuation = null
+            }
+        }
 
-        // BluetoothDevice が見つかるまで一時停止
-        val bluetoothDevice: BluetoothDevice? = suspendCoroutine { continuation ->
-            val bluetoothLeScanner = bluetoothManager.adapter.bluetoothLeScanner
-            val bleScanCallback = object : ScanCallback() {
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            android.util.Log.d("BleCentral", "Services discovered, status: $status")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val service = gatt.getService(BleUuid.GATT_SERVICE_UUID)
+                if (service != null) {
+                    android.util.Log.d("BleCentral", "Target service found")
+                    connectContinuation?.resume(gatt)
+                    connectContinuation = null
+                } else {
+                    android.util.Log.e("BleCentral", "Target service not found")
+                    connectContinuation?.resumeWithException(RuntimeException("Service not found"))
+                    connectContinuation = null
+                }
+            } else {
+                connectContinuation?.resumeWithException(RuntimeException("Discovery failed: $status"))
+                connectContinuation = null
+            }
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            android.util.Log.d("BleCentral", "Characteristic read, status: $status, size: ${value.size}")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                readContinuation?.resume(value)
+            } else {
+                readContinuation?.resumeWithException(RuntimeException("Read failed: $status"))
+            }
+            readContinuation = null
+        }
+
+        @Deprecated("Deprecated in API 33")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            android.util.Log.d("BleCentral", "Characteristic read (legacy), status: $status")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                readContinuation?.resume(characteristic.value ?: byteArrayOf())
+            } else {
+                readContinuation?.resumeWithException(RuntimeException("Read failed: $status"))
+            }
+            readContinuation = null
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            android.util.Log.d("BleCentral", "Characteristic write, status: $status")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                writeContinuation?.resume(Unit)
+            } else {
+                writeContinuation?.resumeWithException(RuntimeException("Write failed: $status"))
+            }
+            writeContinuation = null
+        }
+    }
+
+    private suspend fun scanDevice(): BluetoothDevice {
+        return suspendCancellableCoroutine { continuation ->
+            val bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+
+            val scanCallback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult?) {
-                    super.onScanResult(callbackType, result)
-                    // 見つけたら返して、スキャンも終了させる
-                    continuation.resume(result?.device)
-                    bluetoothLeScanner.stopScan(this)
+                    result ?: return
+                    android.util.Log.d("BleCentral", "Device found: ${result.device.address}")
+
+                    val scanRecord = result.scanRecord
+                    if (scanRecord != null) {
+                        val serviceUuids = scanRecord.serviceUuids ?: emptyList()
+                        android.util.Log.d("BleCentral", "Service UUIDs: $serviceUuids")
+                        if (serviceUuids.any { it == ParcelUuid(BleUuid.GATT_SERVICE_UUID) }) {
+                            android.util.Log.d("BleCentral", "Target device found!")
+                            bluetoothLeScanner.stopScan(this)
+                            if (continuation.isActive) {
+                                continuation.resume(result.device)
+                            }
+                        }
+                    }
                 }
 
                 override fun onScanFailed(errorCode: Int) {
                     super.onScanFailed(errorCode)
-                    continuation.resume(null)
+                    android.util.Log.e("BleCentral", "Scan failed: $errorCode")
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(RuntimeException("Scan failed: $errorCode"))
+                    }
                 }
             }
 
-            // GATT サーバーのサービス UUID を指定して検索を始める
-            val scanFilter = ScanFilter.Builder().apply {
-                setServiceUuid(ParcelUuid(BleUuid.GATT_SERVICE_UUID))
-            }.build()
-            bluetoothLeScanner.startScan(
-                listOf(scanFilter),
-                ScanSettings.Builder().build(),
-                bleScanCallback
-            )
+            continuation.invokeOnCancellation {
+                bluetoothLeScanner.stopScan(scanCallback)
+            }
+
+            val scanFilter = ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(BleUuid.GATT_SERVICE_UUID))
+                .build()
+
+            val scanSettings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+                .build()
+
+            android.util.Log.d("BleCentral", "Starting scan...")
+            bluetoothLeScanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
         }
-
-        // BLE デバイスを見つけたら、GATT サーバーへ接続
-        bluetoothDevice?.connectGatt(context, false, object : BluetoothGattCallback() {
-
-            // ペリフェラル側との接続
-            override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
-                super.onConnectionStateChange(gatt, status, newState)
-                when (newState) {
-                    // 接続できたらサービスを探す
-                    BluetoothProfile.STATE_CONNECTED -> gatt?.discoverServices()
-                    // なくなった
-                    BluetoothProfile.STATE_DISCONNECTED -> _bluetoothGatt.value = null
-                }
-            }
-
-            override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-                super.onServicesDiscovered(gatt, status)
-                // サービスが見つかったら GATT サーバーに対して操作ができるはず
-                // サービスとキャラクタリスティックを探して、read する
-                // キャラクタリスティック操作ができたら flow に入れる
-                _bluetoothGatt.value = gatt
-            }
-
-            // onCharacteristicReadRequest で送られてきたデータを受け取る
-            override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
-                super.onCharacteristicRead(gatt, characteristic, value, status)
-                _characteristicReadChannel.trySend(value)
-            }
-        })
-
-        // GATT サーバーへ接続できるまで一時停止する
-        _bluetoothGatt.first { it != null }
     }
 
-    /** 終了時に呼ぶ */
-    @SuppressLint("MissingPermission")
+    suspend fun connectAndReadCharacteristic(): ByteArray {
+        return withTimeoutOrNull(15_000L) {
+            val device = scanDevice()
+            android.util.Log.d("BleCentral", "Connecting to GATT...")
+
+            // GATT接続とサービス発見
+            bluetoothGatt = suspendCancellableCoroutine { continuation ->
+                connectContinuation = continuation
+                val gatt = device.connectGatt(context, false, gattCallback)
+                if (gatt == null) {
+                    continuation.resumeWithException(RuntimeException("connectGatt returned null"))
+                    connectContinuation = null
+                }
+            }
+
+            android.util.Log.d("BleCentral", "Connected and services discovered, reading characteristic...")
+            readCharacteristic()
+        } ?: throw RuntimeException("Connection timed out")
+    }
+
+    private suspend fun readCharacteristic(): ByteArray {
+        return suspendCancellableCoroutine { continuation ->
+            readContinuation = continuation
+
+            val gatt = bluetoothGatt
+            if (gatt == null) {
+                continuation.resumeWithException(IllegalStateException("No GATT connection"))
+                readContinuation = null
+                return@suspendCancellableCoroutine
+            }
+
+            val service = gatt.getService(BleUuid.GATT_SERVICE_UUID)
+            val characteristic = service?.getCharacteristic(BleUuid.GATT_CHARACTERISTIC_UUID)
+
+            if (characteristic == null) {
+                android.util.Log.e("BleCentral", "Characteristic not found")
+                continuation.resumeWithException(NoSuchElementException("Characteristic not found"))
+                readContinuation = null
+                return@suspendCancellableCoroutine
+            }
+
+            android.util.Log.d("BleCentral", "Requesting read...")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.readCharacteristic(characteristic)
+                    // API 33+では戻り値をチェックせず、コールバックで結果を待つ
+                } else {
+                    @Suppress("DEPRECATION")
+                    if (!gatt.readCharacteristic(characteristic)) {
+                        continuation.resumeWithException(RuntimeException("Failed to initiate read"))
+                        readContinuation = null
+                    }
+                }
+            } catch (e: Exception) {
+                continuation.resumeWithException(e)
+                readContinuation = null
+            }
+        }
+    }
+
+    suspend fun writeCharacteristic(data: ByteArray) {
+        suspendCancellableCoroutine<Unit> { continuation ->
+            writeContinuation = continuation
+
+            val gatt = bluetoothGatt
+            if (gatt == null) {
+                continuation.resumeWithException(IllegalStateException("No GATT connection"))
+                writeContinuation = null
+                return@suspendCancellableCoroutine
+            }
+
+            val service = gatt.getService(BleUuid.GATT_SERVICE_UUID)
+            val characteristic = service?.getCharacteristic(BleUuid.GATT_CHARACTERISTIC_UUID)
+
+            if (characteristic == null) {
+                continuation.resumeWithException(NoSuchElementException("Characteristic not found"))
+                writeContinuation = null
+                return@suspendCancellableCoroutine
+            }
+
+            android.util.Log.d("BleCentral", "Writing ${data.size} bytes...")
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeCharacteristic(
+                        characteristic,
+                        data,
+                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    )
+                    // API 33+では戻り値をチェックせず、コールバックで結果を待つ
+                } else {
+                    characteristic.value = data
+                    characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    @Suppress("DEPRECATION")
+                    if (!gatt.writeCharacteristic(characteristic)) {
+                        continuation.resumeWithException(RuntimeException("Failed to initiate write"))
+                        writeContinuation = null
+                    }
+                }
+            } catch (e: Exception) {
+                continuation.resumeWithException(e)
+                writeContinuation = null
+            }
+        }
+    }
+
     fun destroy() {
-        _bluetoothGatt.value?.close()
-        _bluetoothGatt.value = null
+        bluetoothGatt?.disconnect()
+        bluetoothGatt?.close()
+        bluetoothGatt = null
+        connectContinuation = null
+        readContinuation = null
+        writeContinuation = null
     }
-
-    /** キャラクタリスティックから読み出す */
-    @SuppressLint("MissingPermission")
-    suspend fun readCharacteristic(): ByteArray {
-        // GATT サーバーとの接続を待つ
-        val gatt = _bluetoothGatt.filterNotNull().first()
-        // GATT サーバーへ狙ったサービス内にあるキャラクタリスティックへ read を試みる
-        val findService = gatt.services?.first { it.uuid == BleUuid.GATT_SERVICE_UUID }
-        val findCharacteristic = findService?.characteristics?.first { it.uuid == BleUuid.GATT_CHARACTERISTIC_UUID }
-        // 結果は onCharacteristicRead で
-        gatt.readCharacteristic(findCharacteristic)
-        return _characteristicReadChannel.receive()
-    }
-
-    /** キャラクタリスティックへ書き込む */
-    @SuppressLint("MissingPermission")
-    suspend fun writeCharacteristic(sendData: ByteArray) {
-        // GATT サーバーとの接続を待つ
-        val gatt = _bluetoothGatt.filterNotNull().first()
-        // GATT サーバーへ狙ったサービス内にあるキャラクタリスティックへ write を試みる
-        val findService = gatt.services?.first { it.uuid == BleUuid.GATT_SERVICE_UUID } ?: return
-        val findCharacteristic = findService.characteristics?.first { it.uuid == BleUuid.GATT_CHARACTERISTIC_UUID } ?: return
-        // 結果は onCharacteristicWriteRequest で
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(findCharacteristic, sendData, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        } else {
-            // TODO 下位バージョン対応するなら。UWB 対応デバイスが、TIRAMISU より前に存在するかを考えるとめんどい
-        }
-    }
-
 }
