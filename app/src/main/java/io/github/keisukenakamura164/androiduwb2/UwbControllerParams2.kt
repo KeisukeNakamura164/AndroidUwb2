@@ -6,7 +6,7 @@ import java.io.ObjectOutputStream
 import java.io.Serializable
 
 /** Controller(親)→Controlee(子) へ送るパラメーター */
-data class UwbControllerParams(
+data class UwbControllerParams2(
     val address: ByteArray,
     val channel: Int,
     val preambleIndex: Int,
@@ -17,7 +17,7 @@ data class UwbControllerParams(
     /** シリアライズ、デシリアライズ用 */
     companion object {
 
-        fun encode(uwbHostParameter: UwbControllerParams): ByteArray {
+        fun encode(uwbHostParameter: UwbControllerParams2): ByteArray {
             return ByteArrayOutputStream().use { byteArrayOutputStream ->
                 ObjectOutputStream(byteArrayOutputStream).use { objectOutputStream ->
                     // 書き込んで ByteArray を返す
@@ -27,11 +27,11 @@ data class UwbControllerParams(
             }
         }
 
-        fun decode(byteArray: ByteArray): UwbControllerParams {
+        fun decode(byteArray: ByteArray): UwbControllerParams2 {
             return byteArray.inputStream().use { byteArrayInputStream ->
                 ObjectInputStream(byteArrayInputStream).use { objectInputStream ->
                     // キャストする
-                    objectInputStream.readObject() as UwbControllerParams
+                    objectInputStream.readObject() as UwbControllerParams2
                 }
             }
         }
@@ -41,7 +41,7 @@ data class UwbControllerParams(
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
 
-        other as UwbControllerParams
+        other as UwbControllerParams2
 
         if (!address.contentEquals(other.address)) return false
         if (channel != other.channel) return false
