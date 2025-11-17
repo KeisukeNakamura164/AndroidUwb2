@@ -11,13 +11,15 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import io.github.keisukenakamura164.androiduwb2.ui.screen.ManualUwbScreen
+import io.github.keisukenakamura164.androiduwb2.ui.screen.PassingScreen
 import io.github.keisukenakamura164.androiduwb2.ui.theme.AndroidBleAndUwbSampleTheme
 
 class MainActivity : ComponentActivity() {
@@ -27,8 +29,7 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.values.all { it }
-        if (allGranted) {
+        if (permissions.values.all { it }) {
             android.util.Log.d("MainActivity", "All permissions granted")
             Toast.makeText(this, "すべてのパーミッションが許可されました", Toast.LENGTH_SHORT).show()
             checkLocationServices()
@@ -44,38 +45,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-
         checkAndRequestPermissions()
 
         setContent {
             AndroidBleAndUwbSampleTheme {
-                ManualUwbScreen()
+                PassingScreen()
 
                 if (showLocationDialog) {
-                    androidx.compose.material3.AlertDialog(
+                    AlertDialog(
                         onDismissRequest = { showLocationDialog = false },
-                        title = { androidx.compose.material3.Text("位置情報サービスが無効です") },
+                        title = { Text("位置情報サービスが無効です") },
                         text = {
-                            androidx.compose.material3.Text(
-                                "BLEスキャンを行うには、位置情報サービスを有効にする必要があります。設定画面を開きますか？"
-                            )
+                            Text("BLEスキャンを行うには、位置情報サービスを有効にする必要があります。設定画面を開きますか？")
                         },
                         confirmButton = {
-                            androidx.compose.material3.TextButton(
+                            TextButton(
                                 onClick = {
                                     showLocationDialog = false
                                     startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
                                 }
                             ) {
-                                androidx.compose.material3.Text("設定を開く")
+                                Text("設定を開く")
                             }
                         },
                         dismissButton = {
-                            androidx.compose.material3.TextButton(
+                            TextButton(
                                 onClick = { showLocationDialog = false }
                             ) {
-                                androidx.compose.material3.Text("キャンセル")
+                                Text("キャンセル")
                             }
                         }
                     )
@@ -85,8 +82,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        val permissions = mutableListOf<String>()
-
+        val permissions = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.addAll(
                 listOf(
@@ -96,17 +94,7 @@ class MainActivity : ComponentActivity() {
                     Manifest.permission.UWB_RANGING,
                 )
             )
-        } else {
-            permissions.addAll(
-                listOf(
-                    Manifest.permission.BLUETOOTH,
-                    Manifest.permission.BLUETOOTH_ADMIN,
-                )
-            )
         }
-
-        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
         }
@@ -134,16 +122,12 @@ class MainActivity : ComponentActivity() {
             showLocationDialog = true
         } else {
             android.util.Log.d("MainActivity", "Location services are enabled")
+            showLocationDialog = false
         }
     }
 
     override fun onResume() {
         super.onResume()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
-                checkLocationServices()
-            }
-        }
+        checkAndRequestPermissions()
     }
 }

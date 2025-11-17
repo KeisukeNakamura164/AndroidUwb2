@@ -1,61 +1,36 @@
 package io.github.keisukenakamura164.androiduwb2.ui.screen
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import android.content.Context
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.keisukenakamura164.androiduwb2.ui.viewmodel.AutoRoleViewModel
 
-private val REQUIRED_PERMISSION = listOf(
-    Manifest.permission.BLUETOOTH,
-    Manifest.permission.BLUETOOTH_CONNECT,
-    Manifest.permission.BLUETOOTH_SCAN,
-    Manifest.permission.BLUETOOTH_ADVERTISE,
-    Manifest.permission.ACCESS_COARSE_LOCATION,
-    Manifest.permission.ACCESS_FINE_LOCATION,
-    Manifest.permission.UWB_RANGING
-)
-
 @Composable
 fun PassingScreen(viewModel: AutoRoleViewModel = viewModel()) {
-    val context = LocalContext.current
-
-    // --- 権限確認のロジック ---
-    val isGranted = remember {
-        mutableStateOf(REQUIRED_PERMISSION.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED })
-    }
-    val permissionRequest = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions(),
-        onResult = { permissions -> isGranted.value = permissions.all { it.value } }
-    )
-    LaunchedEffect(key1 = Unit) {
-        if (!isGranted.value) {
-            permissionRequest.launch(REQUIRED_PERMISSION.toTypedArray())
-        }
-    }
-
-
-    // --- ViewModelとの連携 ---
-    // ViewModelが持つUIの状態(UwbUiState)を監視する
+    val context: Context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
-    val distance = uiState.distance
 
-    // 権限が許可されたら、一度だけUWBセッションを開始する
-    LaunchedEffect(isGranted.value) {
-        if (isGranted.value) {
-            viewModel.startRoleDiscoveryAndUwbSession(context)
-        }
+    // この画面が表示されたときに一度だけ実行される
+    // 権限許可はMainActivityが保証している前提
+    LaunchedEffect(Unit) {
+        viewModel.startRoleDiscoveryAndUwbSession(context)
     }
 
     // --- UIの表示部分 ---
@@ -70,36 +45,49 @@ fun PassingScreen(viewModel: AutoRoleViewModel = viewModel()) {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+
+            // 現在の状態（役割）を表示
             Text(
-                text = "現在の役割: ${uiState.role}", // ViewModelが持つ役割(role)を表示
+                text = "現在の状態: ${uiState.role}",
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.padding(bottom = 32.dp)
             )
-            if (!isGranted.value) {
+
+            // 距離がまだ取得できていない（測距前）の場合
+            if (uiState.distance == null) {
                 Text(
-                    text = "権限を許可してください",
+                    text = "相手を探しています...",
                     style = MaterialTheme.typography.bodyLarge
                 )
-            } else if (distance == null) {
-                Text(
-                    text = "相手を探しています...", // メッセージをより具体的に変更
-                    style = MaterialTheme.typography.bodyLarge
-                )
+                Spacer(modifier = Modifier.height(16.dp))
+                CircularProgressIndicator()
             } else {
-                val distanceText = "距離: %.2f m".format(distance)
+                // 距離が取得できた場合
+                val distanceText = "距離: %.2f m".format(uiState.distance)
                 Text(
                     text = distanceText,
-                    style = MaterialTheme.typography.displayMedium // 数字を大きく表示
+                    style = MaterialTheme.typography.displayMedium
                 )
 
-                if (distance <= 10) {
+                // 方角と高さの表示
+                uiState.azimuth?.let {
+                    Text(text = "方角: %.1f °".format(it), style = MaterialTheme.typography.bodyLarge)
+                }
+                uiState.elevation?.let {
+                    Text(text = "高さ: %.1f °".format(it), style = MaterialTheme.typography.bodyLarge)
+                }
+
+                // 10m以内ならメッセージを表示
+                if (uiState.distance!! <= 10) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "通信開始",
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
         }
     }
 }
+
